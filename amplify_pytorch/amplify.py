@@ -17,7 +17,21 @@ def exists(v):
 
 # main class
 
-class Amplify(Module):
-    def __init__(self):
+class MotionTokenizer(Module):
+    def __init__(
+        self,
+        fsq_kwargs: dict = dict()
+    ):
         super().__init__()
-        raise NotImplementedError
+        self.fsq = FSQ(**fsq_kwargs)
+
+class Amplify(Module):
+    def __init__(
+        self,
+        tokenizer: MotionTokenizer,
+        decoder: Decoder,
+    ):
+        super().__init__()
+
+        self.tokenizer = tokenizer
+        self.decoder = decoder
