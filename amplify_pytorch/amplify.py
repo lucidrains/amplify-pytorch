@@ -4,6 +4,7 @@ from torch.nn import Module
 from x_transformers import (
     Encoder,
     Decoder,
+    Attention,
     TransformerWrapper
 )
 
