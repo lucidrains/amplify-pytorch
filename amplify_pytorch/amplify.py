@@ -62,6 +62,7 @@ class MotionTokenizer(Module):
 class Amplify(Module):
     def __init__(
         self,
+        num_action_pred,
         tokenizer: MotionTokenizer,
         llm: TransformerWrapper | Module,
         vit: ViT,
@@ -75,11 +76,17 @@ class Amplify(Module):
         self.llm = llm
         self.vit = vit
 
-        self.embed = nn.Embedding(tokenizer.codebook_size, decoder.dim)
+        dim_model = decoder.dim
+        self.embed = nn.Embedding(tokenizer.codebook_size, dim_model)
 
         self.decoder = decoder
 
+        self.to_logits = nn.Linear(dim_model, tokenizer.codebook_size, bias = False)
+
+        self.pool_queries = nn.Parameter(torch.ones(num_action_pred, dim_model))
         self.pool_to_actions = Attention(**action_cross_attn_pool_kwargs)
+
+        self.to_action_pred = nn.Linear(dim_model, num_action_pred, bias = False)
 
     def forward(
         self,
@@ -111,19 +118,25 @@ class Amplify(Module):
 
         prepend_len = prepended_embeds.shape[1]
 
-        tokens = self.embed(token_ids)
+        motion_tokens = self.embed(token_ids)
 
-        inp, target = tokens[:, :-1], tokens[:, 1:]
+        motion_tokens_inputs, motion_tokens_target = motion_tokens[:, :-1], motion_tokens[:, 1:]
 
-        logits = self.decoder(
-            inp,
-            prepend_embeds = prepended_embeds
-        )
+        decoder_input, packed_shape = pack((prepended_embeds, motion_tokens_inputs), 'b * d')
 
-        logits = logits[:, prepend_len:]
+        embeds = self.decoder(decoder_input)
+
+        _, motion_tokens_attended = unpack(embeds, packed_shape, 'b * d')
+
+        motion_pred_logits = self.to_logits(motion_tokens_attended)
+
+        pool_queries = rearrange('n d -> b n d', b = batch)
+        pooled = self.pool_to_actions(pool_queries, embeds)
+
+        next_action_logits = self.to_action_pred(pooled)
 
         autoregressive_loss = F.cross_entropy(
-            rearrange(logits, 'b n l -> b l n'),
+            rearrange(motion_pred_logits, 'b n l -> b l n'),
             target,
             ignore_index = -1
         )
