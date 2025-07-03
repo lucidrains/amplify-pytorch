@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import torch
 from torch.nn import Module
 
@@ -61,6 +63,7 @@ class Amplify(Module):
     def __init__(
         self,
         tokenizer: MotionTokenizer,
+        llm: TransformerWrapper | Module,
         vit: ViT,
         decoder: Decoder,
         action_cross_attn_pool_kwargs: dict = dict()
@@ -69,6 +72,7 @@ class Amplify(Module):
 
         self.tokenizer = tokenizer
 
+        self.llm = llm
         self.vit = vit
 
         self.embed = nn.Embedding(tokenizer.codebook_size, decoder.dim)
@@ -80,12 +84,17 @@ class Amplify(Module):
     def forward(
         self,
         motion_data,
-        videos,             # Float['b c t h w']
-        prepended_embeds    # Float['b n d]
+        command, # Int['b nc']
+        videos,  # Float['b c t h w']
+        additional_prepended_embeds
     ):
         batch = motion_data.shape[0]
 
         token_ids = self.tokenizer.tokenize(motion_data)
+
+        # language
+
+        command_embed = self.llm(command, return_embeds = True)
 
         # video to image tokens to be prepended
 
@@ -94,7 +103,11 @@ class Amplify(Module):
 
         image_tokens = self.vit(images)
 
-        prepended_embeds = torch.cat((prepended_embeds, image_tokens), dim = 1)
+        prepended_embeds, _ = pack((
+            command_embed,
+            image_tokens
+            additional_prepended_embeds,
+        ), 'b * d')
 
         prepend_len = prepended_embeds.shape[1]
 
