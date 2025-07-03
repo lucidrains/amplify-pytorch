@@ -10,7 +10,10 @@ from x_transformers import (
 
 from vector_quantize_pytorch import FSQ
 
-from einops import rearrange
+from vit_pytorch.vit import ViT
+from vit_pytorch.extractor import Extractor
+
+from einops import rearrange, pack, unpack
 
 # helpers
 
@@ -58,12 +61,15 @@ class Amplify(Module):
     def __init__(
         self,
         tokenizer: MotionTokenizer,
+        vit: ViT,
         decoder: Decoder,
         action_cross_attn_pool_kwargs: dict = dict()
     ):
         super().__init__()
 
         self.tokenizer = tokenizer
+
+        self.vit = vit
 
         self.embed = nn.Embedding(tokenizer.codebook_size, decoder.dim)
 
@@ -74,9 +80,23 @@ class Amplify(Module):
     def forward(
         self,
         motion_data,
-        prepended_embeds
+        videos,             # Float['b c t h w']
+        prepended_embeds    # Float['b n d]
     ):
+        batch = motion_data.shape[0]
+
         token_ids = self.tokenizer.tokenize(motion_data)
+
+        # video to image tokens to be prepended
+
+        images = rearange(videos, 'b c t h w -> b t c h w')
+        images = rearrange(images, 'b t c h w -> (b t) c h w')
+
+        image_tokens = self.vit(images)
+
+        prepended_embeds = torch.cat((prepended_embeds, image_tokens), dim = 1)
+
+        prepend_len = prepended_embeds.shape[1]
 
         tokens = self.embed(token_ids)
 
@@ -87,10 +107,12 @@ class Amplify(Module):
             prepend_embeds = prepended_embeds
         )
 
+        logits = logits[:, prepend_len:]
+
         autoregressive_loss = F.cross_entropy(
             rearrange(logits, 'b n l -> b l n'),
             target,
             ignore_index = -1
         )
 
-        return  autoregressive_loss
+        return autoregressive_loss
