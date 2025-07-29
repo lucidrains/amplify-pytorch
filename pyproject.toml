@@ -27,7 +27,7 @@ dependencies = [
     "accelerate",
     "einops>=0.8.0",
     "torch>=2.0",
-    "x-transformers>=2.5.0",
+    "x-transformers>=2.5.3",
     "vector-quantize-pytorch",
     "vit-pytorch>=1.11.4"
 ]

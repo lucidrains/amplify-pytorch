@@ -6,7 +6,7 @@ from torch.nn import Module
 from x_transformers import (
     Encoder,
     Decoder,
-    Attention,
+    AttentionPool,
     TransformerWrapper
 )
 
@@ -93,8 +93,12 @@ class Amplify(Module):
 
         self.to_logits = nn.Linear(dim_model, tokenizer.codebook_size, bias = False)
 
-        self.pool_queries = nn.Parameter(torch.ones(num_action_pred, dim_model))
-        self.pool_to_actions = Attention(**action_cross_attn_pool_kwargs)
+        self.pool_to_actions = AttentionPool(
+            dim = dim_model,
+            num_pooled_tokens = num_action_pred,
+            dim_context = dim_context,
+            **action_cross_attn_pool_kwargs
+        )
 
         self.to_action_pred = nn.Linear(dim_model, num_action_pred, bias = False)
 
@@ -138,8 +142,7 @@ class Amplify(Module):
 
         motion_pred_logits = self.to_logits(motion_tokens_attended)
 
-        pool_queries = rearrange('n d -> b n d', b = batch)
-        pooled = self.pool_to_actions(pool_queries, embeds)
+        pooled = self.pool_to_actions(embeds)
 
         next_action_logits = self.to_action_pred(pooled)
 
