@@ -29,7 +29,7 @@ dependencies = [
     "torch>=2.0",
     "x-transformers>=2.5.0",
     "vector-quantize-pytorch",
-    "vit-pytorch"
+    "vit-pytorch>=1.11.4"
 ]
 
 [project.urls]

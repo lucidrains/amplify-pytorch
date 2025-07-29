@@ -14,6 +14,7 @@ from vector_quantize_pytorch import FSQ
 
 from vit_pytorch.vit import ViT
 from vit_pytorch.extractor import Extractor
+from vit_pytorch.accept_video_wrapper import AcceptVideoWrapper
 
 from einops import rearrange, pack, unpack
 
@@ -67,6 +68,7 @@ class Amplify(Module):
         llm: TransformerWrapper | Module,
         vit: ViT,
         decoder: Decoder,
+        video_time_seq_len = 16,
         action_cross_attn_pool_kwargs: dict = dict()
     ):
         super().__init__()
@@ -74,10 +76,18 @@ class Amplify(Module):
         self.tokenizer = tokenizer
 
         self.llm = llm
-        self.vit = vit
 
         dim_model = decoder.dim
         self.embed = nn.Embedding(tokenizer.codebook_size, dim_model)
+
+        self.vit = Extractor(vit, return_embeddings_only = True)
+
+        self.accept_video_vit = AcceptVideoWrapper(
+            vit,
+            add_time_pos_emb = True,
+            time_seq_len = video_time_seq_len,
+            dim_emb = dim_model
+        )
 
         self.decoder = decoder
 
@@ -105,14 +115,12 @@ class Amplify(Module):
 
         # video to image tokens to be prepended
 
-        images = rearange(videos, 'b c t h w -> b t c h w')
-        images = rearrange(images, 'b t c h w -> (b t) c h w')
-
-        image_tokens = self.vit(images)
+        image_tokens = self.accept_video_vit(videos)
+        image_tokens = rearrange(image_tokens, 'b t n d -> b (t n) d')
 
         prepended_embeds, _ = pack((
             command_embed,
-            image_tokens
+            image_tokens,
             additional_prepended_embeds,
         ), 'b * d')
 
