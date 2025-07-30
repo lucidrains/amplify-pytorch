@@ -23,7 +23,7 @@ from einops import rearrange, pack, unpack
 def exists(v):
     return v is not None
 
-# main class
+# motion tokenizer
 
 class MotionTokenizer(Module):
     def __init__(
@@ -60,16 +60,22 @@ class MotionTokenizer(Module):
         recon_loss = F.mse_loss(data, recon)
         return recon_loss
 
+# amplify
+
+# forward and inverse dynamics
+
 class Amplify(Module):
     def __init__(
         self,
-        num_action_pred,
+        dim_action = 20,
         tokenizer: MotionTokenizer,
         llm: TransformerWrapper | Module,
         vit: ViT,
         decoder: Decoder,
         video_time_seq_len = 16,
-        action_cross_attn_pool_kwargs: dict = dict()
+        inverse_dynamics_transformer_depth = 2,
+        action_cross_attn_pool_kwargs: dict = dict(),
+        pred_action_loss_weight = 1.
     ):
         super().__init__()
 
@@ -97,17 +103,21 @@ class Amplify(Module):
             dim = dim_model,
             num_pooled_tokens = num_action_pred,
             dim_context = dim_context,
+            use_transformer_blocks = True,
+            depth = inverse_dynamics_transformer_depth,
             **action_cross_attn_pool_kwargs
         )
 
-        self.to_action_pred = nn.Linear(dim_model, num_action_pred, bias = False)
+        self.pred_action_loss_weight = pred_action_loss_weight
+        self.to_action_pred = nn.Linear(dim_model, dim_action, bias = False)
 
     def forward(
         self,
         motion_data,
         command, # Int['b nc']
         videos,  # Float['b c t h w']
-        additional_prepended_embeds
+        additional_prepended_embeds,
+        actions = None
     ):
         batch = motion_data.shape[0]
 
@@ -116,6 +126,8 @@ class Amplify(Module):
         # language
 
         command_embed = self.llm(command, return_embeds = True)
+
+        # forward dynamics
 
         # video to image tokens to be prepended
 
@@ -136,15 +148,13 @@ class Amplify(Module):
 
         decoder_input, packed_shape = pack((prepended_embeds, motion_tokens_inputs), 'b * d')
 
+        # autoregressive transformer
+
         embeds = self.decoder(decoder_input)
 
         _, motion_tokens_attended = unpack(embeds, packed_shape, 'b * d')
 
         motion_pred_logits = self.to_logits(motion_tokens_attended)
-
-        pooled = self.pool_to_actions(embeds)
-
-        next_action_logits = self.to_action_pred(pooled)
 
         autoregressive_loss = F.cross_entropy(
             rearrange(motion_pred_logits, 'b n l -> b l n'),
@@ -152,4 +162,21 @@ class Amplify(Module):
             ignore_index = -1
         )
 
-        return autoregressive_loss
+        # inverse dynamics, cross attention based pooling
+
+        pooled = self.pool_to_actions(embeds)
+
+        action_pred = self.to_action_pred(pooled)
+
+        action_loss = F.l1_loss(action_pred, actions)
+
+        # handle losses
+
+        loss_breakdown = (autoregressive_loss, pred_action_loss)
+
+        total_loss = (
+            autoregressive_loss +
+            pred_action_loss * self.pred_action_loss_weight
+        )
+
+        return total_loss, loss_breakdown
