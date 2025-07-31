@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import torch
+from torch import cat
 from torch.nn import Module
 
 from x_transformers import (
@@ -16,7 +17,7 @@ from vit_pytorch.vit import ViT
 from vit_pytorch.extractor import Extractor
 from vit_pytorch.accept_video_wrapper import AcceptVideoWrapper
 
-from einops import rearrange, pack, unpack
+from einops import rearrange, repeat, pack, unpack
 
 # helpers
 
@@ -88,6 +89,8 @@ class Amplify(Module):
         self.llm = llm
 
         dim_model = decoder.dim
+        self.motion_sos = nn.Parameter(torch.randn(dim_model))
+
         self.embed = nn.Embedding(tokenizer.codebook_size, dim_model)
 
         self.vit = Extractor(vit, return_embeddings_only = True)
@@ -148,7 +151,13 @@ class Amplify(Module):
 
         motion_tokens = self.embed(token_ids)
 
-        motion_tokens_inputs, motion_tokens_target = motion_tokens[:, :-1], motion_tokens[:, 1:]
+        # add motion start token
+
+        motion_sos = repeat(self.motion_sos, 'd -> b 1 d', b = motion_tokens.shape[0])
+
+        motion_tokens = cat((motion_sos, motion_tokens), dim = 1)
+
+        # pack additional embeds, say touch
 
         decoder_input, packed_shape = pack((prepended_embeds, motion_tokens_inputs), 'b * d')
 
@@ -161,8 +170,8 @@ class Amplify(Module):
         motion_pred_logits = self.to_logits(motion_tokens_attended)
 
         autoregressive_loss = F.cross_entropy(
-            rearrange(motion_pred_logits, 'b n l -> b l n'),
-            target,
+            rearrange(motion_pred_logits[:, :-1], 'b n l -> b l n'),
+            token_ids,
             ignore_index = -1
         )
 
