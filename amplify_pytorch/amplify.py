@@ -72,11 +72,12 @@ class MotionTokenizer(Module):
 class Amplify(Module):
     def __init__(
         self,
-        dim_action = 20,
         tokenizer: MotionTokenizer,
         llm: TransformerWrapper | Module,
         vit: ViT,
+        dim_proprio,
         decoder: Decoder,
+        dim_action = 20,
         video_time_seq_len = 16,
         inverse_dynamics_transformer_depth = 2,
         action_cross_attn_pool_kwargs: dict = dict(),
@@ -92,6 +93,8 @@ class Amplify(Module):
         self.motion_sos = nn.Parameter(torch.randn(dim_model))
 
         self.embed = nn.Embedding(tokenizer.codebook_size, dim_model)
+
+        self.to_proprio = nn.Linear(dim_proprio, dim_model)
 
         self.vit = Extractor(vit, return_embeddings_only = True)
 
@@ -123,6 +126,7 @@ class Amplify(Module):
         motion_data,
         command, # Int['b nc']
         videos,  # Float['b c t h w']
+        proprio, # Float['b dp']
         additional_prepended_embeds,
         actions = None
     ):
@@ -176,6 +180,10 @@ class Amplify(Module):
         )
 
         # inverse dynamics, cross attention based pooling
+
+        proprio_tokens = self.to_proprio(proprio)
+
+        embeds, _ = pack((proprio_tokens, embeds), 'b * d')
 
         pooled = self.pool_to_actions(embeds)
 
