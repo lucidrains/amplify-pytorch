@@ -12,3 +12,15 @@ Implementation of [Amplify](https://amplify-robotics.github.io/), Actionless Mot
     url     = {https://amplify-robotics.github.io/amplify.pdf}
 }
 ```
+
+```bibtex
+@misc{argaw2025mambavideodiscretevideotokenization,
+    title   = {MambaVideo for Discrete Video Tokenization with Channel-Split Quantization}, 
+    author  = {Dawit Mureja Argaw and Xian Liu and Joon Son Chung and Ming-Yu Liu and Fitsum Reda},
+    year    = {2025},
+    eprint  = {2507.04559},
+    archivePrefix = {arXiv},
+    primaryClass = {cs.CV},
+    url     = {https://arxiv.org/abs/2507.04559}, 
+}
+```

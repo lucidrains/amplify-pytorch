@@ -28,12 +28,16 @@ def exists(v):
 class MotionTokenizer(Module):
     def __init__(
         self,
+        channel_splits = 4,
         fsq_kwargs: dict = dict()
     ):
         super().__init__()
         self.encoder = nn.Identity()
 
-        self.fsq = FSQ(**fsq_kwargs)
+        self.fsq = FSQ(
+            num_codebooks = channel_splits,
+            **fsq_kwargs
+        )
 
         self.decoder = nn.Identity()
 
