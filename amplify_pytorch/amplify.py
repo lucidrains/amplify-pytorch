@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import torch
-from torch import cat
-from torch.nn import Module
+from torch import nn, cat
+import torch.nn.functional as F
+from torch.nn import Module, Identity
 
 from x_transformers import (
     Encoder,
@@ -29,18 +30,27 @@ def exists(v):
 class MotionTokenizer(Module):
     def __init__(
         self,
-        channel_splits = 4,
-        fsq_kwargs: dict = dict()
+        dim,
+        channel_splits = 1,
+        codebook_size = 64,
+        fsq_kwargs: dict = dict(
+            levels = [8, 5, 5, 5]
+        )
     ):
         super().__init__()
-        self.encoder = nn.Identity()
+        self.encoder = Identity()
 
         self.fsq = FSQ(
+            dim = dim,
             num_codebooks = channel_splits,
             **fsq_kwargs
         )
 
-        self.decoder = nn.Identity()
+        self.decoder = Identity()
+
+    @property
+    def codebook_size(self):
+        return self.fsq.codebook_size
 
     def encode(
         self,
@@ -60,7 +70,7 @@ class MotionTokenizer(Module):
     ):
         quantized, indices = self.encode(motion_data)
 
-        recon = self.encoder(quantized)
+        recon = self.decoder(quantized)
 
         recon_loss = F.mse_loss(data, recon)
         return recon_loss
@@ -74,9 +84,11 @@ class Amplify(Module):
         self,
         tokenizer: MotionTokenizer,
         llm: TransformerWrapper | Module,
-        vit: ViT,
+        vit: dict | ViT,
         dim_proprio,
-        decoder: Decoder,
+        dim_image_embed,
+        action_chunk_size,
+        decoder: dict | Decoder,
         dim_action = 20,
         video_time_seq_len = 16,
         inverse_dynamics_transformer_depth = 2,
@@ -89,6 +101,9 @@ class Amplify(Module):
 
         self.llm = llm
 
+        if isinstance(decoder, dict):
+            decoder = Decoder(**decoder)
+
         dim_model = decoder.dim
         self.motion_sos = nn.Parameter(torch.randn(dim_model))
 
@@ -96,13 +111,18 @@ class Amplify(Module):
 
         self.to_proprio = nn.Linear(dim_proprio, dim_model)
 
+        if isinstance(vit, dict):
+            vit = ViT(**vit)
+
         self.vit = Extractor(vit, return_embeddings_only = True)
 
         self.accept_video_vit = AcceptVideoWrapper(
-            vit,
+            self.vit,
             add_time_pos_emb = True,
+            output_pos_add_pos_emb = 0,
             time_seq_len = video_time_seq_len,
-            dim_emb = dim_model
+            dim_emb = dim_image_embed,
+            proj_embed_to_dim = dim_model
         )
 
         self.decoder = decoder
@@ -111,12 +131,14 @@ class Amplify(Module):
 
         self.pool_to_actions = AttentionPool(
             dim = dim_model,
-            num_pooled_tokens = num_action_pred,
-            dim_context = dim_context,
+            num_pooled_tokens = action_chunk_size,
+            dim_context = dim_model,
             use_transformer_blocks = True,
             depth = inverse_dynamics_transformer_depth,
             **action_cross_attn_pool_kwargs
         )
+
+        self.action_shape = (action_chunk_size, dim_action)
 
         self.pred_action_loss_weight = pred_action_loss_weight
         self.to_action_pred = nn.Linear(dim_model, dim_action, bias = False)
@@ -124,11 +146,12 @@ class Amplify(Module):
     def forward(
         self,
         motion_data,
-        command, # Int['b nc']
+        commands, # Int['b nc']
         videos,  # Float['b c t h w']
         proprio, # Float['b dp']
-        additional_prepended_embeds,
-        actions = None
+        additional_prepended_embeds = None,
+        actions = None,
+        return_loss_breakdown = False
     ):
         batch = motion_data.shape[0]
 
@@ -136,7 +159,7 @@ class Amplify(Module):
 
         # language
 
-        command_embed = self.llm(command, return_embeds = True)
+        command_embed = self.llm(commands, return_embeddings = True)
 
         # forward dynamics
 
@@ -144,6 +167,9 @@ class Amplify(Module):
 
         image_tokens = self.accept_video_vit(videos)
         image_tokens = rearrange(image_tokens, 'b t n d -> b (t n) d')
+
+        if not exists(additional_prepended_embeds):
+            additional_prepended_embeds = command_embed[:, 0:0]
 
         prepended_embeds, _ = pack((
             command_embed,
@@ -163,7 +189,7 @@ class Amplify(Module):
 
         # pack additional embeds, say touch
 
-        decoder_input, packed_shape = pack((prepended_embeds, motion_tokens_inputs), 'b * d')
+        decoder_input, packed_shape = pack((prepended_embeds, motion_tokens), 'b * d')
 
         # autoregressive transformer
 
@@ -175,7 +201,7 @@ class Amplify(Module):
 
         autoregressive_loss = F.cross_entropy(
             rearrange(motion_pred_logits[:, :-1], 'b n l -> b l n'),
-            token_ids,
+            token_ids.long(),
             ignore_index = -1
         )
 
@@ -189,15 +215,24 @@ class Amplify(Module):
 
         action_pred = self.to_action_pred(pooled)
 
+        if not exists(actions):
+            return action_pred
+
+        assert actions.shape[1:] == self.action_shape, f'expected shape {self.action_shape} but received {tuple(actions.shape)}'
+
         action_loss = F.l1_loss(action_pred, actions)
 
         # handle losses
 
-        loss_breakdown = (autoregressive_loss, pred_action_loss)
+        loss_breakdown = (autoregressive_loss, action_loss)
 
         total_loss = (
             autoregressive_loss +
-            pred_action_loss * self.pred_action_loss_weight
+            action_loss * self.pred_action_loss_weight
         )
 
+        if not return_loss_breakdown:
+            return total_loss
+
         return total_loss, loss_breakdown
+
