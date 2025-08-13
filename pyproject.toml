@@ -25,6 +25,7 @@ classifiers=[
 
 dependencies = [
     "accelerate",
+    "axial-positional-embedding>=0.1.1",
     "einops>=0.8.0",
     "torch>=2.4",
     "x-transformers>=2.5.3",
