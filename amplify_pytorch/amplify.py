@@ -109,20 +109,22 @@ class MotionTokenizer(Module):
         super().__init__()
         self.shape = (num_views, height, width, channels)
 
-        # positional embeddings
-
-        self.view_pos_emb = Parameter(torch.randn(num_views, dim) * 1e-2)
-        self.time_pos_emb = Parameter(torch.randn(max_time_seq_len, dim) * 1e-2)
-
-        self.max_time_seq_len = max_time_seq_len
-
-        # encoder
-
         assert divisible_by(height, patch_size)
         assert divisible_by(width, patch_size)
 
         self.num_height_patches = height // patch_size
         self.num_width_patches = width // patch_size
+
+        # positional embeddings
+
+        self.view_pos_emb = Parameter(torch.randn(num_views, dim) * 1e-2)
+        self.time_pos_emb = Parameter(torch.randn(max_time_seq_len, dim) * 1e-2)
+        self.height_pos_emb = Parameter(torch.randn(self.num_height_patches, dim) * 1e-2)
+        self.width_pos_emb = Parameter(torch.randn(self.num_width_patches, dim) * 1e-2)
+
+        self.max_time_seq_len = max_time_seq_len
+
+        # encoder
 
         dim_patch = channels * patch_size ** 2
 
@@ -172,7 +174,14 @@ class MotionTokenizer(Module):
 
         # add positional embeddings
 
-        patch_tokens = einx.add('b t ... v d, t d, v d', patch_tokens, self.time_pos_emb[:times], self.view_pos_emb)
+        patch_tokens = einx.add(
+            'b t h w v d, t d, h d, w d, v d',
+            patch_tokens,
+            self.time_pos_emb[:times],
+            self.height_pos_emb,
+            self.width_pos_emb,
+            self.view_pos_emb
+        )
 
         # add view positional embedding
 
@@ -215,9 +224,15 @@ class MotionTokenizer(Module):
         # constitute learned queries for detr like decoder
         # also incorporating details from private correspondance with author
 
-        decoder_queries = einx.add('t d, v d -> t v d', self.time_pos_emb[:times], self.view_pos_emb)
+        decoder_queries = einx.add(
+            't d, h d, w d, v d -> t v h w d',
+            self.time_pos_emb[:times],
+            self.height_pos_emb,
+            self.width_pos_emb,
+            self.view_pos_emb
+        )
 
-        decoder_queries = repeat(decoder_queries, 't v d -> b t v h w d', b = batch, h = self.num_height_patches, w = self.num_width_patches)
+        decoder_queries = repeat(decoder_queries, '... -> b ...', b = batch)
 
         decoder_queries, _ = pack_and_inverse(decoder_queries, 'b * d')
 
