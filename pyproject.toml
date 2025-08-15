@@ -1,6 +1,6 @@
 [project]
 name = "amplify-pytorch"
-version = "0.0.1"
+version = "0.0.3"
 description = "Amplify"
 authors = [
     { name = "Phil Wang", email = "lucidrains@gmail.com" }
@@ -25,7 +25,6 @@ classifiers=[
 
 dependencies = [
     "accelerate",
-    "axial-positional-embedding>=0.1.1",
     "einops>=0.8.0",
     "torch>=2.4",
     "x-transformers>=2.5.3",

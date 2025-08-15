@@ -3,12 +3,13 @@ from __future__ import annotations
 import torch
 from torch import nn, cat
 import torch.nn.functional as F
-from torch.nn import Module, Identity
+from torch.nn import Module, Parameter, Sequential, Identity
 
 from x_transformers import (
     Encoder,
     Decoder,
     AttentionPool,
+    CrossAttender,
     TransformerWrapper
 )
 
@@ -18,27 +19,124 @@ from vit_pytorch.vit import ViT
 from vit_pytorch.extractor import Extractor
 from vit_pytorch.accept_video_wrapper import AcceptVideoWrapper
 
+import einx
+from einops.layers.torch import Rearrange
 from einops import rearrange, repeat, pack, unpack
+
+# ein notation
+
+# b - batch
+# t - time
+# v - num views
+# h - height
+# w - width
+# c - velocity / position
 
 # helpers
 
 def exists(v):
     return v is not None
 
+def default(v, d):
+    return v if exists(v) else d
+
+def divisible_by(num, den):
+    return (num % den) == 0
+
+def pack_and_inverse(t, pattern):
+    packed, packed_shape = pack([t], pattern)
+
+    def inverse_fn(out, inv_pattern = None):
+        inv_pattern = default(inv_pattern, pattern)
+        out, = unpack(out, packed_shape, inv_pattern)
+        return out
+
+    return packed, inverse_fn
+
+def pad_at_dim(
+    t,
+    pad: tuple[int, int],
+    dim = -1,
+    value = 0.
+):
+    if pad == (0, 0):
+        return t
+
+    dims_from_right = (-dim - 1) if dim < 0 else (t.ndim - dim - 1)
+    zeros = ((0, 0) * dims_from_right)
+    return F.pad(t, (*zeros, *pad), value = value)
+
 # motion tokenizer
+
+def trajectory_to_velocities(
+    trajectories # (b t ...)
+):
+    trajectories = pad_at_dim(trajectories, (1, 0), dim = 1)
+    velocities = trajectories[:, 1:] - trajectories[:, :-1]
+    return velocities
+
+def velocities_to_trajectory(
+    velocities # (b t ...)
+):
+    return velocities.cumsum(dim = 1)
 
 class MotionTokenizer(Module):
     def __init__(
         self,
         dim,
+        channels = 2,
+        height = 16,
+        width = 16,
+        patch_size = 4,
+        num_views = 3,
         channel_splits = 1,
         codebook_size = 64,
+        max_time_seq_len = 16,
+        encoder_kwargs: dict = dict(
+            depth = 2,
+            attn_dim_head = 64,
+            heads = 8
+        ),
+        decoder_kwargs: dict = dict(
+            depth = 2,
+            attn_dim_head = 64,
+            heads = 8
+        ),
         fsq_kwargs: dict = dict(
             levels = [8, 5, 5, 5]
         )
     ):
         super().__init__()
-        self.encoder = Identity()
+        self.shape = (num_views, height, width, channels)
+
+        # positional embeddings
+
+        self.view_pos_emb = Parameter(torch.randn(num_views, dim) * 1e-2)
+        self.time_pos_emb = Parameter(torch.randn(max_time_seq_len, dim) * 1e-2)
+
+        self.max_time_seq_len = max_time_seq_len
+
+        # encoder
+
+        assert divisible_by(height, patch_size)
+        assert divisible_by(width, patch_size)
+
+        self.num_height_patches = height // patch_size
+        self.num_width_patches = width // patch_size
+
+        dim_patch = channels * patch_size ** 2
+
+        self.patchify = Sequential(
+            Rearrange('b t v (h p1) (w p2) c -> b t h w v (p1 p2 c)', p1 = patch_size, p2 = patch_size),
+            nn.Linear(dim_patch, dim)
+        )
+
+        self.encoder = Encoder(
+            dim = dim,
+            **encoder_kwargs
+        )
+
+        # fsq
 
         self.fsq = FSQ(
             dim = dim,
@@ -46,7 +144,17 @@ class MotionTokenizer(Module):
             **fsq_kwargs
         )
 
-        self.decoder = Identity()
+        # decoder
+
+        self.decoder = CrossAttender(
+            dim = dim,
+            **decoder_kwargs
+        )
+
+        self.depatchify = Sequential(
+            nn.Linear(dim, dim_patch),
+            Rearrange('b t h w v (p1 p2 c) -> b t v (h p1) (w p2) c', p1 = patch_size, p2 = patch_size),
+        )
 
     @property
     def codebook_size(self):
@@ -54,26 +162,84 @@ class MotionTokenizer(Module):
 
     def encode(
         self,
-        motion_data
+        velocities, # (b t v h w c)
+        return_pack_inverse_fn = False
     ):
-        encoded = self.encoder(motion_data)
-        return self.fsq(encoded)
+        times = velocities.shape[1]
+        assert times <= self.max_time_seq_len
+
+        patch_tokens = self.patchify(velocities)
+
+        # add positional embeddings
+
+        patch_tokens = einx.add('b t ... v d, t d, v d', patch_tokens, self.time_pos_emb[:times], self.view_pos_emb)
+
+        # add view positional embedding
+
+        patch_tokens, inverse_fn = pack_and_inverse(patch_tokens, 'b * d')
+
+        encoded = self.encoder(patch_tokens)
+
+        output = self.fsq(encoded)
+
+        if not return_pack_inverse_fn:
+            return output
+
+        return output, inverse_fn
 
     @torch.no_grad()
-    def tokenize(self, motion_data):
-        _, token_ids = self.encode(motion_data)
+    def tokenize(
+        self,
+        trajectories # (b t v h w c)
+    ):
+        assert trajectories.shape[-4:] == self.shape
+
+        velocities = trajectory_to_velocities(trajectories)
+
+        _, token_ids = self.encode(velocities)
         return token_ids
 
     def forward(
         self,
-        motion_data
+        trajectories, # (b t v h w c)
+        return_recon_trajectories = False,
+        return_recons = False
     ):
-        quantized, indices = self.encode(motion_data)
+        batch, times = trajectories.shape[:2]
+        assert trajectories.shape[-4:] == self.shape
 
-        recon = self.decoder(quantized)
+        velocities = trajectory_to_velocities(trajectories)
 
-        recon_loss = F.mse_loss(data, recon)
-        return recon_loss
+        (quantized, indices), inverse_fn = self.encode(trajectories, return_pack_inverse_fn = True)
+
+        # constitute learned queries for detr like decoder
+        # also incorporating details from private correspondance with author
+
+        decoder_queries = einx.add('t d, v d -> t v d', self.time_pos_emb[:times], self.view_pos_emb)
+
+        decoder_queries = repeat(decoder_queries, 't v d -> b t v h w d', b = batch, h = self.num_height_patches, w = self.num_width_patches)
+
+        decoder_queries, _ = pack_and_inverse(decoder_queries, 'b * d')
+
+        decoded_tokens = self.decoder(decoder_queries, context = quantized)
+
+        decoded_tokens = inverse_fn(decoded_tokens)
+
+        recon_velocities = self.depatchify(decoded_tokens)
+
+        recon_loss = F.mse_loss(velocities, recon_velocities)
+
+        recons = (recon_velocities,)
+
+        if return_recon_trajectories:
+            recon_trajectories = velocities_to_trajectory(recon_velocities)
+
+            recons = (*recons, recon_trajectories)
+
+        if not return_recons:
+            return recon_loss
+
+        return recon_loss, recons
 
 # amplify
 
@@ -145,7 +311,7 @@ class Amplify(Module):
 
     def forward(
         self,
-        motion_data,
+        trajectories,
         commands, # Int['b nc']
         videos,  # Float['b c t h w']
         proprio, # Float['b dp']
@@ -153,9 +319,9 @@ class Amplify(Module):
         actions = None,
         return_loss_breakdown = False
     ):
-        batch = motion_data.shape[0]
+        batch = trajectories.shape[0]
 
-        token_ids = self.tokenizer.tokenize(motion_data)
+        token_ids = self.tokenizer.tokenize(trajectories)
 
         # language
 
@@ -235,4 +401,3 @@ class Amplify(Module):
             return total_loss
 
         return total_loss, loss_breakdown
-
