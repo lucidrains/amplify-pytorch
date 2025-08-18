@@ -52,7 +52,7 @@ def test_amplify():
     traj = torch.randn(2, 16, 3, 16, 16, 2)
 
     loss = amplify(
-        traj,
+        trajectories = traj,
         commands = torch.randint(0, 20000, (2, 512)),
         videos = torch.randn(2, 3, 16, 224, 224),
         proprio = torch.randn(2, 17),
@@ -64,7 +64,6 @@ def test_amplify():
     # after much training
 
     pred_action_chunk = amplify(
-        traj,
         commands = torch.randint(0, 20000, (2, 512)),
         videos = torch.randn(2, 3, 16, 224, 224),
         proprio = torch.randn(2, 17),

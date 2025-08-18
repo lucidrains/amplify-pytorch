@@ -1,6 +1,6 @@
 [project]
 name = "amplify-pytorch"
-version = "0.0.4"
+version = "0.0.5"
 description = "Amplify"
 authors = [
     { name = "Phil Wang", email = "lucidrains@gmail.com" }
@@ -27,7 +27,7 @@ dependencies = [
     "accelerate",
     "einops>=0.8.0",
     "torch>=2.4",
-    "x-transformers>=2.5.3",
+    "x-transformers>=2.7.2",
     "vector-quantize-pytorch",
     "vit-pytorch>=1.11.6"
 ]

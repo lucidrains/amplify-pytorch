@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import torch
-from torch import nn, cat
+from torch import nn, cat, tensor
 import torch.nn.functional as F
 from torch.nn import Module, Parameter, Sequential, Identity
 
@@ -10,7 +10,8 @@ from x_transformers import (
     Decoder,
     AttentionPool,
     CrossAttender,
-    TransformerWrapper
+    TransformerWrapper,
+    AutoregressiveWrapper
 )
 
 from vector_quantize_pytorch import FSQ
@@ -39,6 +40,9 @@ def exists(v):
 
 def default(v, d):
     return v if exists(v) else d
+
+def xnor(x, y):
+    return not (x ^ y)
 
 def divisible_by(num, den):
     return (num % den) == 0
@@ -272,6 +276,7 @@ class Amplify(Module):
         decoder: dict | Decoder,
         dim_action = 20,
         video_time_seq_len = 16,
+        motion_max_seq_len = 1024,
         inverse_dynamics_transformer_depth = 2,
         action_cross_attn_pool_kwargs: dict = dict(),
         pred_action_loss_weight = 1.
@@ -286,9 +291,6 @@ class Amplify(Module):
             decoder = Decoder(**decoder)
 
         dim_model = decoder.dim
-        self.motion_sos = nn.Parameter(torch.randn(dim_model))
-
-        self.embed = nn.Embedding(tokenizer.codebook_size, dim_model)
 
         self.to_proprio = nn.Linear(dim_proprio, dim_model)
 
@@ -305,6 +307,18 @@ class Amplify(Module):
             dim_emb = dim_image_embed,
             proj_embed_to_dim = dim_model
         )
+
+        total_codebook_size = tokenizer.codebook_size
+
+        self.motion_transformer = TransformerWrapper(
+            num_tokens = tokenizer.codebook_size + 1,
+            max_seq_len = motion_max_seq_len,
+            attn_layers = decoder
+        )
+
+        self.motion_autoregressive_wrapper = AutoregressiveWrapper(self.motion_transformer)
+
+        self.register_buffer('motion_sos_id', tensor(tokenizer.codebook_size))
 
         self.decoder = decoder
 
@@ -326,17 +340,19 @@ class Amplify(Module):
 
     def forward(
         self,
-        trajectories,
+        *,
         commands, # Int['b nc']
         videos,  # Float['b c t h w']
         proprio, # Float['b dp']
+        trajectories = None,
         additional_prepended_embeds = None,
         actions = None,
-        return_loss_breakdown = False
+        return_loss_breakdown = False,
+        generate_motion_max_seq_len = 768
     ):
-        batch = trajectories.shape[0]
+        assert xnor(exists(trajectories), exists(actions))
 
-        token_ids = self.tokenizer.tokenize(trajectories)
+        batch = videos.shape[0]
 
         # language
 
@@ -360,37 +376,37 @@ class Amplify(Module):
 
         prepend_len = prepended_embeds.shape[1]
 
-        motion_tokens = self.embed(token_ids)
+        # motion transformer
 
-        # add motion start token
+        motion_sos_ids = repeat(self.motion_sos_id, ' -> b 1', b = batch)
 
-        motion_sos = repeat(self.motion_sos, 'd -> b 1 d', b = motion_tokens.shape[0])
+        if exists(trajectories):
+            token_ids = self.tokenizer.tokenize(trajectories)
 
-        motion_tokens = cat((motion_sos, motion_tokens), dim = 1)
 
-        # pack additional embeds, say touch
+            token_ids = cat((motion_sos_ids, token_ids), dim = -1)
 
-        decoder_input, packed_shape = pack((prepended_embeds, motion_tokens), 'b * d')
+            autoregressive_loss, (_, intermediates) = self.motion_autoregressive_wrapper(
+                token_ids,
+                prepend_embeds = prepended_embeds,
+                return_outputs = True
+            )
 
-        # autoregressive transformer
+            motion_embeds = intermediates.initial_embed[:, prepend_len:]
+        else:
+            # inferencing
 
-        embeds = self.decoder(decoder_input)
+            generated_motion_ids = self.motion_autoregressive_wrapper.generate(motion_sos_ids, seq_len = generate_motion_max_seq_len)
 
-        _, motion_tokens_attended = unpack(embeds, packed_shape, 'b * d')
+            motion_embeds = self.motion_transformer.token_emb(generated_motion_ids)
 
-        motion_pred_logits = self.to_logits(motion_tokens_attended)
-
-        autoregressive_loss = F.cross_entropy(
-            rearrange(motion_pred_logits[:, :-1], 'b n l -> b l n'),
-            token_ids.long(),
-            ignore_index = -1
-        )
+            motion_embeds = motion_embeds + self.motion_transformer.pos_emb(motion_embeds)
 
         # inverse dynamics, cross attention based pooling
 
         proprio_tokens = self.to_proprio(proprio)
 
-        embeds, _ = pack((proprio_tokens, embeds), 'b * d')
+        embeds, _ = pack((proprio_tokens, motion_embeds), 'b * d')
 
         pooled = self.pool_to_actions(embeds)
 
