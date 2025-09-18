@@ -4,6 +4,8 @@
 
 Implementation of [Amplify](https://amplify-robotics.github.io/), Actionless Motion Priors for Robot Learning from Videos
 
+Official repository is released [here](https://github.com/pairlab/AMPLIFY)!
+
 ## Citations
 
 ```bibtex
