@@ -9,9 +9,14 @@ Official repository is released [here](https://github.com/pairlab/AMPLIFY)!
 ## Citations
 
 ```bibtex
-@misc{Anonymous2025,
-    author  = {Anonymous},
-    url     = {https://amplify-robotics.github.io/amplify.pdf}
+@misc{collins2025amplify,
+    title   = {AMPLIFY: Actionless Motion Priors for Robot Learning from Videos},
+    author  = {Jeremy A. Collins and Loránd Cheng and Kunal Aneja and Albert Wilcox and Benjamin Joffe and Animesh Garg},
+    year    = {2025},
+    eprint  = {2506.14198},
+    archivePrefix = {arXiv},
+    primaryClass = {cs.RO},
+    url     = {https://arxiv.org/abs/2506.14198}
 }
 ```
 
